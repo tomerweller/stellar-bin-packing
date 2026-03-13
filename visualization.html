@@ -1,0 +1,1571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stellar Bin Packing Algorithm — Interactive Visualization</title>
+<style>
+:root {
+  --bg: #0f1117;
+  --panel: #181b24;
+  --border: #2a2e3a;
+  --text: #e0e0e8;
+  --text-dim: #7a7e8c;
+  --accent: #5b8def;
+  --accent-dim: #3a5a9e;
+  --red: #e05555;
+  --orange: #e0a050;
+  --green: #50c070;
+  --yellow: #d4c040;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+  height: 100vh;
+}
+#app {
+  display: grid;
+  grid-template-rows: 44px 48px 1fr 120px;
+  height: 100vh;
+}
+
+/* Tab bar */
+.tab-bar {
+  display: flex;
+  align-items: center;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+  gap: 4px;
+}
+.tab-bar .title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-right: 24px;
+  white-space: nowrap;
+}
+.tab {
+  padding: 8px 16px;
+  font-size: 12px;
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  border-bottom: 2px solid transparent;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Control panel */
+.controls {
+  display: flex;
+  align-items: center;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+  gap: 12px;
+  overflow-x: auto;
+  font-size: 11px;
+}
+.controls label { color: var(--text-dim); white-space: nowrap; }
+.controls input[type="range"] { width: 80px; accent-color: var(--accent); }
+.controls select, .controls button {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.controls button:hover { border-color: var(--accent); }
+.controls button.active-btn { background: var(--accent); color: #fff; border-color: var(--accent); }
+.controls .sep { width: 1px; height: 24px; background: var(--border); flex-shrink: 0; }
+.controls .val { color: var(--accent); min-width: 18px; text-align: center; }
+
+/* Canvas area */
+.canvas-area {
+  position: relative;
+  overflow: hidden;
+}
+.canvas-area canvas {
+  position: absolute;
+  top: 0; left: 0;
+}
+
+/* Narration */
+.narration {
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  padding: 12px 16px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.narration .step-text { color: var(--text); }
+.narration .step-label { color: var(--accent); font-weight: 600; margin-right: 8px; }
+.narration .step-detail { color: var(--text-dim); }
+.narration .stats-row {
+  display: flex;
+  gap: 24px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.narration .stat { }
+.narration .stat-label { color: var(--text-dim); }
+.narration .stat-value { color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="tab-bar">
+    <span class="title">Stellar Bin Packing</span>
+    <button class="tab active" data-tab="packing">Packing Simulation</button>
+    <button class="tab" data-tab="binpacking">Bin Packing Comparison</button>
+    <button class="tab" data-tab="stages">Stage Comparison</button>
+  </div>
+
+  <div class="controls" id="controls">
+    <!-- filled by JS per tab -->
+  </div>
+
+  <div class="canvas-area" id="canvas-area">
+    <canvas id="main-canvas"></canvas>
+  </div>
+
+  <div class="narration" id="narration"></div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════════════════════
+// DATA MODEL
+// ══════════════════════════════════════════════════════════════════════════════
+
+class Transaction {
+  constructor(id, fee, instructions, readKeys, writeKeys) {
+    this.id = id;
+    this.fee = fee;
+    this.instructions = instructions;
+    this.readKeys = readKeys;   // string[]
+    this.writeKeys = writeKeys; // string[]
+    this.conflictTxs = new Set();
+    this.included = false;
+    this.stageIdx = -1;
+    this.binIdx = -1;
+  }
+}
+
+class Cluster {
+  constructor(txId, instructions) {
+    this.txIds = new Set([txId]);
+    this.instructions = instructions;
+    this.conflictTxs = new Set();
+    this.binId = -1;
+    this.color = null;
+  }
+  merge(other) {
+    for (const id of other.txIds) this.txIds.add(id);
+    this.instructions += other.instructions;
+    for (const id of other.conflictTxs) this.conflictTxs.add(id);
+  }
+  clone() {
+    const c = new Cluster(-1, 0);
+    c.txIds = new Set(this.txIds);
+    c.instructions = this.instructions;
+    c.conflictTxs = new Set(this.conflictTxs);
+    c.binId = this.binId;
+    c.color = this.color;
+    return c;
+  }
+}
+
+class Stage {
+  constructor(clustersPerStage, insnsPerCluster) {
+    this.clusters = [];
+    this.binInstructions = new Array(clustersPerStage).fill(0);
+    this.totalInstructions = 0;
+    this.allConflictTxs = new Set();
+    this.txToCluster = new Map();
+    this.triedCompacting = false;
+    this.clustersPerStage = clustersPerStage;
+    this.insnsPerCluster = insnsPerCluster;
+  }
+  insnsPerStage() { return this.insnsPerCluster * this.clustersPerStage; }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// COLOR UTILITIES
+// ══════════════════════════════════════════════════════════════════════════════
+
+const CLUSTER_COLORS = [
+  '#6ec6ff','#ff8a80','#b9f6ca','#ffe57f','#ea80fc',
+  '#80d8ff','#ff80ab','#ccff90','#ffd180','#b388ff',
+  '#84ffff','#ff9e80','#f4ff81','#82b1ff','#ff80ab',
+  '#a7ffeb','#ffab91','#e6ee9c','#9fa8da','#f48fb1',
+];
+
+function feeToColor(fee, minFee, maxFee) {
+  const t = maxFee > minFee ? (fee - minFee) / (maxFee - minFee) : 0.5;
+  // warm (gold) for high fee, cool (blue) for low fee
+  const r = Math.round(70 + 185 * t);
+  const g = Math.round(120 + 80 * t * (1 - t * 0.5));
+  const b = Math.round(230 - 160 * t);
+  return `rgb(${r},${g},${b})`;
+}
+
+function utilizationColor(pct) {
+  if (pct < 0.5) return '#50c070';
+  if (pct < 0.8) return '#d4c040';
+  return '#e05555';
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GEOMETRY UTILITIES
+// ══════════════════════════════════════════════════════════════════════════════
+
+function convexHull(points) {
+  if (points.length < 3) return points.slice();
+  const pts = points.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (O, A, B) => (A.x - O.x) * (B.y - O.y) - (A.y - O.y) * (B.x - O.x);
+  const lower = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  const upper = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pts[i]) <= 0) upper.pop();
+    upper.push(pts[i]);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
+function buildTxClusterMap(binState) {
+  // Returns Map<txId, {color, clusterKey}>
+  const map = new Map();
+  for (let si = 0; si < binState.length; si++) {
+    for (let bi = 0; bi < binState[si].length; bi++) {
+      for (const cl of binState[si][bi]) {
+        const key = `s${si}b${bi}_${cl.txIds.join(',')}`;
+        for (const txId of cl.txIds) {
+          map.set(txId, {color: cl.color, clusterKey: key, stageIdx: si, binIdx: bi});
+        }
+      }
+    }
+  }
+  return map;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALGORITHM ENGINE — produces a trace
+// ══════════════════════════════════════════════════════════════════════════════
+
+function detectConflicts(txs) {
+  // Group by key
+  const keyMap = new Map(); // key -> {ro: Set<txId>, rw: Set<txId>}
+  for (const tx of txs) {
+    for (const k of tx.readKeys) {
+      if (!keyMap.has(k)) keyMap.set(k, {ro: new Set(), rw: new Set()});
+      keyMap.get(k).ro.add(tx.id);
+    }
+    for (const k of tx.writeKeys) {
+      if (!keyMap.has(k)) keyMap.set(k, {ro: new Set(), rw: new Set()});
+      keyMap.get(k).rw.add(tx.id);
+    }
+  }
+  // Mark conflicts
+  const conflictEdges = []; // {a, b, type}
+  const seen = new Set();
+  for (const [key, {ro, rw}] of keyMap) {
+    // RW-RW
+    const rwArr = [...rw];
+    for (let i = 0; i < rwArr.length; i++) {
+      for (let j = i + 1; j < rwArr.length; j++) {
+        const a = rwArr[i], b = rwArr[j];
+        const edgeKey = a < b ? `${a}-${b}` : `${b}-${a}`;
+        if (!seen.has(edgeKey)) {
+          seen.add(edgeKey);
+          txs[a].conflictTxs.add(b);
+          txs[b].conflictTxs.add(a);
+          conflictEdges.push({a, b, type: 'RW-RW', key});
+        }
+      }
+    }
+    // RO-RW
+    for (const r of ro) {
+      for (const w of rw) {
+        if (r === w) continue;
+        const edgeKey = r < w ? `${r}-${w}` : `${w}-${r}`;
+        if (!seen.has(edgeKey)) {
+          seen.add(edgeKey);
+          txs[r].conflictTxs.add(w);
+          txs[w].conflictTxs.add(r);
+          conflictEdges.push({a: r, b: w, type: 'RO-RW', key});
+        }
+      }
+    }
+  }
+  return conflictEdges;
+}
+
+function runAlgorithm(txs, stageCount, binsPerStage, insnsPerCluster) {
+  const trace = [];
+  const stages = [];
+  for (let s = 0; s < stageCount; s++) {
+    stages.push(new Stage(binsPerStage, insnsPerCluster));
+  }
+
+  // Sort by descending fee
+  const sorted = txs.map(t => t.id).sort((a, b) => txs[b].fee - txs[a].fee);
+  let totalFeeCollected = 0;
+  let surgePricing = false;
+
+  trace.push({type: 'start', stageCount, binsPerStage, insnsPerCluster, txCount: txs.length});
+
+  for (const txIdx of sorted) {
+    const tx = txs[txIdx];
+    trace.push({type: 'consider_tx', txId: txIdx, fee: tx.fee, instructions: tx.instructions});
+
+    let added = false;
+
+    for (let si = 0; si < stages.length; si++) {
+      const stage = stages[si];
+      trace.push({type: 'try_stage', txId: txIdx, stageIdx: si});
+
+      // Fast-fail: total instructions
+      if (stage.totalInstructions + tx.instructions > stage.insnsPerStage()) {
+        trace.push({type: 'stage_full', txId: txIdx, stageIdx: si, reason: 'total_instructions'});
+        continue;
+      }
+
+      // Find conflicting clusters
+      const conflictingClusters = [];
+      if (stage.allConflictTxs.has(tx.id)) {
+        for (const cid of tx.conflictTxs) {
+          if (stage.txToCluster.has(cid)) {
+            const cl = stage.txToCluster.get(cid);
+            if (!conflictingClusters.includes(cl)) conflictingClusters.push(cl);
+          }
+        }
+      }
+
+      // Check merged instructions
+      let mergedInsns = tx.instructions;
+      for (const cl of conflictingClusters) mergedInsns += cl.instructions;
+      if (mergedInsns > insnsPerCluster) {
+        trace.push({type: 'stage_reject', txId: txIdx, stageIdx: si, reason: 'merged_too_large',
+          mergedInsns, limit: insnsPerCluster,
+          conflictClusterIds: conflictingClusters.map(c => [...c.txIds])});
+        continue;
+      }
+
+      // Identify merged cluster txIds for trace
+      const mergedTxIds = new Set([txIdx]);
+      for (const cl of conflictingClusters) for (const id of cl.txIds) mergedTxIds.add(id);
+
+      trace.push({type: 'merge_clusters', txId: txIdx, stageIdx: si,
+        conflictClusterCount: conflictingClusters.length,
+        mergedTxIds: [...mergedTxIds], mergedInsns});
+
+      // Create merged cluster
+      const newCluster = new Cluster(txIdx, tx.instructions);
+      newCluster.conflictTxs = new Set(tx.conflictTxs);
+      for (const cl of conflictingClusters) newCluster.merge(cl);
+      newCluster.color = conflictingClusters.length > 0 ? conflictingClusters[0].color
+        : CLUSTER_COLORS[stage.clusters.length % CLUSTER_COLORS.length];
+
+      // Remove old conflicting clusters
+      const savedBins = conflictingClusters.map(c => ({binId: c.binId, insns: c.instructions}));
+      stage.clusters = stage.clusters.filter(c => !conflictingClusters.includes(c));
+      stage.clusters.push(newCluster);
+
+      // In-place bin packing
+      for (const cl of conflictingClusters) {
+        stage.binInstructions[cl.binId] -= cl.instructions;
+      }
+      let packed = false;
+      for (let b = 0; b < binsPerStage; b++) {
+        if (stage.binInstructions[b] + newCluster.instructions <= insnsPerCluster) {
+          stage.binInstructions[b] += newCluster.instructions;
+          newCluster.binId = b;
+          packed = true;
+          trace.push({type: 'bin_assign', txId: txIdx, stageIdx: si, binId: b,
+            method: 'first_fit', mergedTxIds: [...mergedTxIds]});
+          break;
+        }
+      }
+
+      if (!packed) {
+        // Revert freed space
+        for (const s of savedBins) {
+          stage.binInstructions[s.binId] += s.insns;
+        }
+        // Try FFD
+        if (conflictingClusters.length === 0 && stage.triedCompacting) {
+          // Remove newCluster, restore old
+          stage.clusters.pop();
+          for (const cl of conflictingClusters) stage.clusters.push(cl);
+          trace.push({type: 'stage_reject', txId: txIdx, stageIdx: si, reason: 'bin_packing_failed_skip_ffd'});
+          continue;
+        }
+        if (conflictingClusters.length === 0) stage.triedCompacting = true;
+
+        // FFD
+        const sortedClusters = [...stage.clusters].sort((a, b) => b.instructions - a.instructions);
+        const newBinInsns = new Array(binsPerStage).fill(0);
+        let ffdOk = true;
+        for (const cl of sortedClusters) {
+          let found = false;
+          for (let b = 0; b < binsPerStage; b++) {
+            if (newBinInsns[b] + cl.instructions <= insnsPerCluster) {
+              newBinInsns[b] += cl.instructions;
+              cl.binId = b;
+              found = true;
+              break;
+            }
+          }
+          if (!found) { ffdOk = false; break; }
+        }
+        if (!ffdOk) {
+          stage.clusters.pop();
+          for (const cl of conflictingClusters) stage.clusters.push(cl);
+          trace.push({type: 'stage_reject', txId: txIdx, stageIdx: si, reason: 'ffd_failed'});
+          continue;
+        }
+        stage.binInstructions = newBinInsns;
+        trace.push({type: 'bin_assign', txId: txIdx, stageIdx: si, binId: newCluster.binId,
+          method: 'ffd', mergedTxIds: [...mergedTxIds]});
+      }
+
+      // Success
+      stage.totalInstructions += tx.instructions;
+      for (const id of tx.conflictTxs) stage.allConflictTxs.add(id);
+      for (const id of newCluster.txIds) stage.txToCluster.set(id, newCluster);
+
+      tx.included = true;
+      tx.stageIdx = si;
+      tx.binIdx = newCluster.binId;
+      totalFeeCollected += tx.fee;
+      added = true;
+
+      // Capture bin state snapshot for rendering
+      const binStateSnapshot = [];
+      for (let _si = 0; _si < stages.length; _si++) {
+        const bins = [];
+        for (let _b = 0; _b < binsPerStage; _b++) {
+          const clustersInBin = stages[_si].clusters.filter(c => c.binId === _b);
+          bins.push(clustersInBin.map(c => ({txIds: [...c.txIds], instructions: c.instructions, color: c.color})));
+        }
+        binStateSnapshot.push(bins);
+      }
+
+      trace.push({type: 'tx_accepted', txId: txIdx, stageIdx: si, binId: newCluster.binId,
+        totalFee: totalFeeCollected, binStateSnapshot});
+      break;
+    }
+
+    if (!added) {
+      surgePricing = true;
+      trace.push({type: 'tx_skipped', txId: txIdx, surgePricing: true});
+    }
+  }
+
+  // Compute utilization
+  let totalCapacity = 0, totalUsed = 0;
+  const stageSnapshots = [];
+  for (let si = 0; si < stages.length; si++) {
+    const s = stages[si];
+    const bins = [];
+    for (let b = 0; b < binsPerStage; b++) {
+      const clustersInBin = s.clusters.filter(c => c.binId === b);
+      bins.push({
+        instructions: s.binInstructions[b],
+        clusters: clustersInBin.map(c => ({txIds: [...c.txIds], instructions: c.instructions, color: c.color}))
+      });
+      totalCapacity += insnsPerCluster;
+      totalUsed += s.binInstructions[b];
+    }
+    stageSnapshots.push({bins, totalInstructions: s.totalInstructions});
+  }
+
+  trace.push({type: 'done', totalFee: totalFeeCollected, surgePricing,
+    utilization: totalCapacity > 0 ? totalUsed / totalCapacity : 0,
+    stageSnapshots});
+
+  return {trace, stages, stageSnapshots, totalFeeCollected, surgePricing,
+    utilization: totalCapacity > 0 ? totalUsed / totalCapacity : 0};
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PRESET SCENARIOS
+// ══════════════════════════════════════════════════════════════════════════════
+
+function generatePreset(name, txCount, binsPerStage, stageCount, budget) {
+  const insnsPerCluster = Math.floor(budget / stageCount);
+  let txs = [];
+
+  if (name === 'independent') {
+    for (let i = 0; i < txCount; i++) {
+      const fee = 100 + Math.floor(Math.random() * 900);
+      const insns = Math.floor(insnsPerCluster * (0.05 + Math.random() * 0.25));
+      txs.push(new Transaction(i, fee, insns, [`key_${i}`], []));
+    }
+  } else if (name === 'oracle') {
+    // 1 writer + N-1 readers of "ORACLE_PRICE"
+    txs.push(new Transaction(0, 10000, Math.floor(insnsPerCluster * 0.15), [], ['ORACLE_PRICE']));
+    for (let i = 1; i < txCount; i++) {
+      const fee = 200 + Math.floor(Math.random() * 500);
+      const insns = Math.floor(insnsPerCluster * (0.05 + Math.random() * 0.15));
+      txs.push(new Transaction(i, fee, insns, ['ORACLE_PRICE'], [`user_${i}`]));
+    }
+  } else if (name === 'chain') {
+    // Transitive chain: A↔B, B↔C, C↔D, ...
+    for (let i = 0; i < txCount; i++) {
+      const fee = 500 + Math.floor(Math.random() * 500);
+      const insns = Math.floor(insnsPerCluster * (0.05 + Math.random() * 0.1));
+      const rk = i > 0 ? [`shared_${i-1}`] : [];
+      const wk = [`shared_${i}`];
+      txs.push(new Transaction(i, fee, insns, rk, wk));
+    }
+  } else if (name === 'near_capacity') {
+    // Large txs that barely fit
+    for (let i = 0; i < txCount; i++) {
+      const fee = 100 + Math.floor(Math.random() * 900);
+      const insns = Math.floor(insnsPerCluster * (0.2 + Math.random() * 0.35));
+      // Some share keys for conflicts
+      const keyId = Math.floor(i / 3);
+      const isWriter = i % 3 === 0;
+      txs.push(new Transaction(i, fee, insns,
+        isWriter ? [] : [`res_${keyId}`],
+        isWriter ? [`res_${keyId}`] : []));
+    }
+  } else {
+    // Random
+    const keys = [];
+    for (let i = 0; i < Math.max(5, Math.floor(txCount * 0.4)); i++) keys.push(`key_${i}`);
+    for (let i = 0; i < txCount; i++) {
+      const fee = 50 + Math.floor(Math.random() * 950);
+      const insns = Math.floor(insnsPerCluster * (0.05 + Math.random() * 0.3));
+      const nRead = Math.floor(Math.random() * 3);
+      const nWrite = 1 + Math.floor(Math.random() * 2);
+      const rk = [], wk = [];
+      for (let j = 0; j < nRead; j++) rk.push(keys[Math.floor(Math.random() * keys.length)]);
+      for (let j = 0; j < nWrite; j++) wk.push(keys[Math.floor(Math.random() * keys.length)]);
+      txs.push(new Transaction(i, fee, insns, [...new Set(rk)], [...new Set(wk)]));
+    }
+  }
+  return txs;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ANIMATION / TRACE REPLAY
+// ══════════════════════════════════════════════════════════════════════════════
+
+class PackingSimulation {
+  constructor() {
+    this.txs = [];
+    this.conflictEdges = [];
+    this.trace = [];
+    this.result = null;
+    this.step = 0;
+    this.playing = false;
+    this.speed = 3; // steps per second
+    this.lastTick = 0;
+
+    // Parameters
+    this.binsPerStage = 6;
+    this.stageCount = 2;
+    this.budget = 100000;
+    this.txCount = 20;
+    this.preset = 'oracle';
+    this.lastStepChange = 0;
+    this.prevStep = -1;
+  }
+
+  generate() {
+    this.txs = generatePreset(this.preset, this.txCount, this.binsPerStage, this.stageCount, this.budget);
+    this.conflictEdges = detectConflicts(this.txs);
+    this.result = runAlgorithm(this.txs, this.stageCount, this.binsPerStage, Math.floor(this.budget / this.stageCount));
+    this.trace = this.result.trace;
+    this.step = 0;
+    this.playing = false;
+  }
+
+  stepForward() { if (this.step < this.trace.length - 1) this.step++; }
+  stepBack() { if (this.step > 0) this.step--; }
+
+  currentState() {
+    // Build state up to current step
+    const state = {
+      currentTxId: -1,
+      tryingStage: -1,
+      includedTxs: new Set(),
+      skippedTxs: new Set(),
+      totalFee: 0,
+      utilization: 0,
+      surgePricing: false,
+      stageSnapshots: null,
+      highlightEdges: [],
+      mergedTxIds: [],
+      assignedBin: -1,
+      assignedStage: -1,
+      stepType: '',
+      narration: '',
+    };
+
+    for (let i = 0; i <= this.step; i++) {
+      const ev = this.trace[i];
+      state.stepType = ev.type;
+
+      if (ev.type === 'consider_tx') {
+        state.currentTxId = ev.txId;
+        state.tryingStage = -1;
+        state.mergedTxIds = [];
+        state.assignedBin = -1;
+        state.assignedStage = -1;
+      } else if (ev.type === 'try_stage') {
+        state.tryingStage = ev.stageIdx;
+      } else if (ev.type === 'merge_clusters') {
+        state.mergedTxIds = ev.mergedTxIds;
+      } else if (ev.type === 'bin_assign') {
+        state.assignedBin = ev.binId;
+        state.assignedStage = ev.stageIdx;
+      } else if (ev.type === 'tx_accepted') {
+        state.includedTxs.add(ev.txId);
+        state.totalFee = ev.totalFee;
+        state.assignedBin = ev.binId;
+        state.assignedStage = ev.stageIdx;
+      } else if (ev.type === 'tx_skipped') {
+        state.skippedTxs.add(ev.txId);
+        state.surgePricing = true;
+      } else if (ev.type === 'done') {
+        state.stageSnapshots = ev.stageSnapshots;
+        state.utilization = ev.utilization;
+        state.totalFee = ev.totalFee;
+      }
+    }
+
+    // Highlight conflict edges for current tx
+    if (state.currentTxId >= 0) {
+      state.highlightEdges = this.conflictEdges.filter(
+        e => e.a === state.currentTxId || e.b === state.currentTxId);
+    }
+
+    // Build narration
+    const ev = this.trace[this.step];
+    if (ev.type === 'start') {
+      state.narration = `Starting packing: ${ev.txCount} transactions, ${ev.stageCount} stages, ${ev.binsPerStage} bins/stage, ${ev.insnsPerCluster.toLocaleString()} insns/bin`;
+    } else if (ev.type === 'consider_tx') {
+      const tx = this.txs[ev.txId];
+      state.narration = `Considering tx ${ev.txId} (fee: ${ev.fee}, insns: ${ev.instructions.toLocaleString()}, reads: [${tx.readKeys.join(', ')}], writes: [${tx.writeKeys.join(', ')}])`;
+    } else if (ev.type === 'try_stage') {
+      state.narration = `Trying stage ${ev.stageIdx}...`;
+    } else if (ev.type === 'stage_full') {
+      state.narration = `Stage ${ev.stageIdx} rejected: total instructions would exceed capacity`;
+    } else if (ev.type === 'stage_reject') {
+      if (ev.reason === 'merged_too_large') {
+        state.narration = `Stage ${ev.stageIdx} rejected: merged cluster (${ev.mergedInsns.toLocaleString()} insns) > limit (${ev.limit.toLocaleString()})`;
+      } else if (ev.reason === 'ffd_failed') {
+        state.narration = `Stage ${ev.stageIdx} rejected: FFD bin packing failed`;
+      } else {
+        state.narration = `Stage ${ev.stageIdx} rejected: ${ev.reason}`;
+      }
+    } else if (ev.type === 'merge_clusters') {
+      state.narration = ev.conflictClusterCount > 0
+        ? `Merging tx ${ev.txId} with ${ev.conflictClusterCount} conflicting cluster(s) → cluster [${ev.mergedTxIds.join(',')}] (${ev.mergedInsns.toLocaleString()} insns)`
+        : `Creating new cluster for tx ${ev.txId} (${ev.mergedInsns.toLocaleString()} insns)`;
+    } else if (ev.type === 'bin_assign') {
+      state.narration = `Assigned to bin ${ev.binId} in stage ${ev.stageIdx} via ${ev.method === 'ffd' ? 'FFD rebuild' : 'first-fit'}`;
+    } else if (ev.type === 'tx_accepted') {
+      state.narration = `✓ Tx ${ev.txId} accepted → stage ${ev.stageIdx}, bin ${ev.binId}. Total fee: ${ev.totalFee.toLocaleString()}`;
+    } else if (ev.type === 'tx_skipped') {
+      state.narration = `✗ Tx ${ev.txId} skipped (no stage could fit it). Surge pricing triggered.`;
+    } else if (ev.type === 'done') {
+      state.narration = `Done! Fee: ${ev.totalFee.toLocaleString()}, Utilization: ${(ev.utilization * 100).toFixed(1)}%${ev.surgePricing ? ' — Surge pricing active' : ''}`;
+    }
+
+    return state;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RENDERERS
+// ══════════════════════════════════════════════════════════════════════════════
+
+const canvas = document.getElementById('main-canvas');
+const ctx = canvas.getContext('2d');
+
+function resizeCanvas() {
+  const area = document.getElementById('canvas-area');
+  canvas.width = area.clientWidth * devicePixelRatio;
+  canvas.height = area.clientHeight * devicePixelRatio;
+  canvas.style.width = area.clientWidth + 'px';
+  canvas.style.height = area.clientHeight + 'px';
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+}
+
+function getCanvasSize() {
+  return {w: canvas.width / devicePixelRatio, h: canvas.height / devicePixelRatio};
+}
+
+function renderPackingSimulation(sim) {
+  const {w, h} = getCanvasSize();
+  ctx.clearRect(0, 0, w, h);
+
+  const state = sim.currentState();
+  const txs = sim.txs;
+  const edges = sim.conflictEdges;
+
+  if (txs.length === 0) return;
+
+  const minFee = Math.min(...txs.map(t => t.fee));
+  const maxFee = Math.max(...txs.map(t => t.fee));
+  const maxInsns = Math.max(...txs.map(t => t.instructions));
+  const insnsPerCluster = Math.floor(sim.budget / sim.stageCount);
+
+  // Animation progress (0→1 over 150ms after step change)
+  const animT = Math.min(1, (performance.now() - sim.lastStepChange) / 150);
+
+  // Build tx→cluster color map from current bin state
+  const binState = buildBinState(sim, state);
+  const txClusterMap = buildTxClusterMap(binState);
+
+  // Layout: 3 panels
+  const pad = 12;
+  const queueW = Math.min(220, w * 0.22);
+  const graphW = Math.min(300, w * 0.32);
+  const gridW = w - queueW - graphW - pad * 4;
+
+  // ─── LEFT PANEL: Transaction Queue ───
+  const queueX = pad;
+  const queueY = pad;
+  const queueH = h - pad * 2;
+
+  ctx.fillStyle = '#181b24';
+  ctx.fillRect(queueX, queueY, queueW, queueH);
+  ctx.strokeStyle = '#2a2e3a';
+  ctx.strokeRect(queueX, queueY, queueW, queueH);
+
+  ctx.fillStyle = '#7a7e8c';
+  ctx.font = '11px monospace';
+  ctx.fillText('Transaction Queue (by fee ↓)', queueX + 8, queueY + 16);
+
+  const sorted = [...txs].sort((a, b) => b.fee - a.fee);
+  const rowH = Math.min(26, (queueH - 28) / txs.length);
+
+  for (let i = 0; i < sorted.length; i++) {
+    const tx = sorted[i];
+    const y = queueY + 24 + i * rowH;
+    const barW = Math.max(8, (tx.instructions / maxInsns) * (queueW - 60));
+
+    let alpha = 0.7;
+    let fillColor = feeToColor(tx.fee, minFee, maxFee);
+
+    if (state.skippedTxs.has(tx.id)) {
+      fillColor = '#444';
+      alpha = 0.4;
+    } else if (state.includedTxs.has(tx.id)) {
+      alpha = 0.5;
+    }
+    if (tx.id === state.currentTxId) {
+      alpha = 1.0;
+      // highlight bg
+      ctx.fillStyle = 'rgba(91,141,239,0.15)';
+      ctx.fillRect(queueX + 1, y - 1, queueW - 2, rowH);
+    }
+
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = fillColor;
+    ctx.fillRect(queueX + 50, y + 2, barW, rowH - 5);
+
+    ctx.fillStyle = state.skippedTxs.has(tx.id) ? '#666' : '#ccc';
+    ctx.font = '10px monospace';
+    ctx.fillText(`T${tx.id}`, queueX + 6, y + rowH - 6);
+    ctx.fillStyle = '#888';
+    ctx.fillText(`${tx.fee}`, queueX + 28, y + rowH - 6);
+
+    if (state.skippedTxs.has(tx.id)) {
+      ctx.strokeStyle = '#666';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(queueX + 4, y + rowH / 2);
+      ctx.lineTo(queueX + queueW - 4, y + rowH / 2);
+      ctx.stroke();
+    }
+
+    // Feature 5: Show read/write keys for highlighted tx
+    if (tx.id === state.currentTxId && rowH >= 20) {
+      ctx.globalAlpha = animT;
+      ctx.fillStyle = '#5b8def';
+      ctx.font = '8px monospace';
+      const keyStr = (tx.readKeys.length > 0 ? 'R:' + tx.readKeys.join(',') : '') +
+        (tx.writeKeys.length > 0 ? ' W:' + tx.writeKeys.join(',') : '');
+      const maxKeyLen = Math.floor((queueW - 12) / 4.8);
+      const truncated = keyStr.length > maxKeyLen ? keyStr.slice(0, maxKeyLen) + '…' : keyStr;
+      ctx.fillText(truncated, queueX + 6, y + rowH - 1);
+    }
+
+    ctx.globalAlpha = 1;
+  }
+
+  // ─── CENTER PANEL: Conflict Graph ───
+  const graphX = queueX + queueW + pad;
+  const graphY = pad;
+  const graphH = h - pad * 2;
+
+  ctx.fillStyle = '#181b24';
+  ctx.fillRect(graphX, graphY, graphW, graphH);
+  ctx.strokeStyle = '#2a2e3a';
+  ctx.strokeRect(graphX, graphY, graphW, graphH);
+
+  ctx.fillStyle = '#7a7e8c';
+  ctx.font = '11px monospace';
+  ctx.fillText('Conflict Graph', graphX + 8, graphY + 16);
+
+  // Layout nodes in a circle
+  const cx = graphX + graphW / 2;
+  const cy = graphY + graphH / 2 + 8;
+  const radius = Math.min(graphW, graphH) * 0.35;
+  const nodePositions = [];
+  for (let i = 0; i < txs.length; i++) {
+    const angle = (2 * Math.PI * i / txs.length) - Math.PI / 2;
+    nodePositions.push({
+      x: cx + radius * Math.cos(angle),
+      y: cy + radius * Math.sin(angle)
+    });
+  }
+
+  // Draw edges
+  for (const edge of edges) {
+    const pa = nodePositions[edge.a];
+    const pb = nodePositions[edge.b];
+    const isHighlight = state.highlightEdges.includes(edge);
+
+    ctx.beginPath();
+    ctx.moveTo(pa.x, pa.y);
+    ctx.lineTo(pb.x, pb.y);
+    ctx.strokeStyle = isHighlight
+      ? (edge.type === 'RW-RW' ? '#e05555' : '#e0a050')
+      : (edge.type === 'RW-RW' ? 'rgba(224,85,85,0.2)' : 'rgba(224,160,80,0.15)');
+    ctx.lineWidth = isHighlight ? 2.5 : 1;
+    ctx.stroke();
+  }
+
+  // Draw convex hulls around clusters (Feature 4)
+  const clusterGroups = new Map(); // clusterKey → {color, points}
+  for (let i = 0; i < txs.length; i++) {
+    const info = txClusterMap.get(i);
+    if (!info) continue;
+    if (!clusterGroups.has(info.clusterKey)) {
+      clusterGroups.set(info.clusterKey, {color: info.color, points: []});
+    }
+    clusterGroups.get(info.clusterKey).points.push(nodePositions[i]);
+  }
+  for (const [, group] of clusterGroups) {
+    if (group.points.length < 2) continue;
+    const hull = group.points.length >= 3 ? convexHull(group.points) : group.points;
+    ctx.beginPath();
+    if (hull.length >= 3) {
+      ctx.moveTo(hull[0].x, hull[0].y);
+      for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
+      ctx.closePath();
+    } else {
+      // 2 points — draw a thick line
+      ctx.moveTo(hull[0].x, hull[0].y);
+      ctx.lineTo(hull[1].x, hull[1].y);
+    }
+    ctx.fillStyle = group.color;
+    ctx.globalAlpha = 0.08;
+    if (hull.length >= 3) ctx.fill();
+    ctx.strokeStyle = group.color;
+    ctx.globalAlpha = 0.25;
+    ctx.lineWidth = hull.length >= 3 ? 1.5 : 3;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // Draw nodes (colored by cluster membership when assigned, else by fee)
+  const nodeR = Math.max(6, Math.min(14, 160 / txs.length));
+  for (let i = 0; i < txs.length; i++) {
+    const tx = txs[i];
+    const p = nodePositions[i];
+    const clusterInfo = txClusterMap.get(i);
+    let fill = clusterInfo ? clusterInfo.color : feeToColor(tx.fee, minFee, maxFee);
+    let strokeCol = 'transparent';
+    let r = nodeR;
+
+    if (state.skippedTxs.has(i)) fill = '#444';
+    if (i === state.currentTxId) {
+      strokeCol = '#fff';
+      r = nodeR + 3 * animT; // animate highlight ring (Feature 6)
+    }
+    if (state.mergedTxIds.includes(i) && i !== state.currentTxId) {
+      strokeCol = '#5b8def';
+    }
+
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = fill;
+    ctx.fill();
+    if (strokeCol !== 'transparent') {
+      ctx.strokeStyle = strokeCol;
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = i === state.currentTxId ? animT : 1;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.fillStyle = '#fff';
+    ctx.font = `${Math.max(8, nodeR - 1)}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(i, p.x, p.y);
+  }
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+
+  // Legend
+  const legY = graphY + graphH - 36;
+  ctx.fillStyle = '#e05555';
+  ctx.fillRect(graphX + 8, legY, 10, 10);
+  ctx.fillStyle = '#888';
+  ctx.font = '9px monospace';
+  ctx.fillText('RW-RW', graphX + 22, legY + 9);
+  ctx.fillStyle = '#e0a050';
+  ctx.fillRect(graphX + 72, legY, 10, 10);
+  ctx.fillStyle = '#888';
+  ctx.fillText('RO-RW', graphX + 86, legY + 9);
+
+  // ─── RIGHT PANEL: Stage/Bin Grid ───
+  const gridX = graphX + graphW + pad;
+  const gridY = pad;
+  const gridH = h - pad * 2;
+
+  ctx.fillStyle = '#181b24';
+  ctx.fillRect(gridX, gridY, gridW, gridH);
+  ctx.strokeStyle = '#2a2e3a';
+  ctx.strokeRect(gridX, gridY, gridW, gridH);
+
+  ctx.fillStyle = '#7a7e8c';
+  ctx.font = '11px monospace';
+  ctx.fillText('Stages & Bins', gridX + 8, gridY + 16);
+
+  // binState already computed above
+  const stageCount = sim.stageCount;
+  const binsPerStage = sim.binsPerStage;
+  const stageH = (gridH - 30) / stageCount;
+  const binW = Math.max(20, (gridW - 20) / binsPerStage);
+
+  for (let si = 0; si < stageCount; si++) {
+    const sy = gridY + 26 + si * stageH;
+
+    ctx.fillStyle = '#7a7e8c';
+    ctx.font = '10px monospace';
+    ctx.fillText(`Stage ${si}`, gridX + 4, sy + 12);
+
+    const isCurrentStage = state.tryingStage === si;
+
+    for (let bi = 0; bi < binsPerStage; bi++) {
+      const bx = gridX + 8 + bi * binW;
+      const by = sy + 16;
+      const bh = stageH - 24;
+      const bw = binW - 4;
+
+      // Bin container
+      ctx.fillStyle = isCurrentStage && state.assignedBin === bi ? 'rgba(91,141,239,0.1)' : '#12141a';
+      ctx.fillRect(bx, by, bw, bh);
+      ctx.strokeStyle = isCurrentStage ? '#5b8def44' : '#2a2e3a';
+      ctx.strokeRect(bx, by, bw, bh);
+
+      // Capacity line
+      const capY = by;
+      ctx.strokeStyle = '#e0555544';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(bx, capY);
+      ctx.lineTo(bx + bw, capY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Draw clusters stacked from bottom
+      const clusters = binState[si] ? (binState[si][bi] || []) : [];
+      let stackY = by + bh;
+
+      for (const cl of clusters) {
+        const clH = Math.max(4, (cl.instructions / insnsPerCluster) * bh);
+        // Animate: if this cluster contains the just-accepted tx, lerp height
+        const isNew = state.assignedBin === bi && state.assignedStage === si
+          && cl.txIds.includes(state.currentTxId);
+        const effectiveH = isNew ? clH * animT : clH;
+        stackY -= effectiveH;
+        ctx.fillStyle = cl.color || '#5b8def';
+        ctx.globalAlpha = isNew ? 0.4 + 0.35 * animT : 0.75;
+        ctx.fillRect(bx + 1, stackY, bw - 2, effectiveH - 1);
+        ctx.globalAlpha = 1;
+
+        // Tx ids
+        if (effectiveH > 10) {
+          ctx.fillStyle = '#fff';
+          ctx.font = `${Math.min(10, effectiveH - 2)}px monospace`;
+          const label = cl.txIds.length <= 3 ? cl.txIds.join(',') : cl.txIds.slice(0, 2).join(',') + '…';
+          ctx.fillText(label, bx + 3, stackY + Math.min(11, effectiveH - 1));
+        }
+      }
+
+      // Bin utilization %
+      const totalBinInsns = clusters.reduce((s, c) => s + c.instructions, 0);
+      const pct = totalBinInsns / insnsPerCluster;
+      ctx.fillStyle = utilizationColor(pct);
+      ctx.font = '9px monospace';
+      ctx.fillText(`${(pct * 100).toFixed(0)}%`, bx + 2, by + bh + 10);
+    }
+  }
+}
+
+function buildBinState(sim, state) {
+  // Look up the latest bin state snapshot from trace (stored at each tx_accepted event)
+  for (let i = sim.step; i >= 0; i--) {
+    const ev = sim.trace[i];
+    if (ev.type === 'tx_accepted' && ev.binStateSnapshot) {
+      return ev.binStateSnapshot;
+    }
+  }
+  // No accepted txs yet — return empty bins
+  const result = [];
+  for (let si = 0; si < sim.stageCount; si++) {
+    const bins = [];
+    for (let b = 0; b < sim.binsPerStage; b++) bins.push([]);
+    result.push(bins);
+  }
+  return result;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// BIN PACKING COMPARISON RENDERER
+// ══════════════════════════════════════════════════════════════════════════════
+
+let binPackingClusters = [];
+let binPackingBins = 6;
+let binPackingCapacity = 1000;
+
+function generateBinPackingData(count, bins, capacity) {
+  binPackingBins = bins;
+  binPackingCapacity = capacity;
+  binPackingClusters = [];
+  for (let i = 0; i < count; i++) {
+    binPackingClusters.push({
+      id: i,
+      instructions: Math.floor(capacity * (0.05 + Math.random() * 0.4)),
+      color: CLUSTER_COLORS[i % CLUSTER_COLORS.length]
+    });
+  }
+}
+
+function runFirstFit(clusters, bins, capacity) {
+  const binInsns = new Array(bins).fill(0);
+  const assignment = [];
+  for (const cl of clusters) {
+    let placed = false;
+    for (let b = 0; b < bins; b++) {
+      if (binInsns[b] + cl.instructions <= capacity) {
+        binInsns[b] += cl.instructions;
+        assignment.push({...cl, binId: b});
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) assignment.push({...cl, binId: -1});
+  }
+  return {binInsns, assignment};
+}
+
+function runFFD(clusters, bins, capacity) {
+  const sorted = [...clusters].sort((a, b) => b.instructions - a.instructions);
+  return runFirstFit(sorted, bins, capacity);
+}
+
+function renderBinPackingComparison() {
+  const {w, h} = getCanvasSize();
+  ctx.clearRect(0, 0, w, h);
+
+  if (binPackingClusters.length === 0) {
+    generateBinPackingData(15, 6, 1000);
+  }
+
+  const ff = runFirstFit(binPackingClusters, binPackingBins, binPackingCapacity);
+  const ffd = runFFD(binPackingClusters, binPackingBins, binPackingCapacity);
+
+  const pad = 16;
+  const halfW = (w - pad * 3) / 2;
+
+  // Draw both sides
+  [
+    {title: 'First-Fit (arrival order)', data: ff, x: pad},
+    {title: 'First-Fit Decreasing (sorted)', data: ffd, x: pad * 2 + halfW}
+  ].forEach(({title, data, x}) => {
+    ctx.fillStyle = '#181b24';
+    ctx.fillRect(x, pad, halfW, h - pad * 2);
+    ctx.strokeStyle = '#2a2e3a';
+    ctx.strokeRect(x, pad, halfW, h - pad * 2);
+
+    ctx.fillStyle = '#7a7e8c';
+    ctx.font = '12px monospace';
+    ctx.fillText(title, x + 8, pad + 18);
+
+    const binW = Math.max(20, (halfW - 16) / binPackingBins);
+    const binH = h - pad * 2 - 50;
+
+    // Stats
+    const used = data.binInsns.reduce((s, v) => s + v, 0);
+    const total = binPackingBins * binPackingCapacity;
+    const maxBin = Math.max(...data.binInsns);
+    const placed = data.assignment.filter(a => a.binId >= 0).length;
+
+    ctx.fillStyle = '#aaa';
+    ctx.font = '10px monospace';
+    ctx.fillText(`Utilization: ${(used / total * 100).toFixed(1)}%  |  Max bin: ${maxBin}/${binPackingCapacity}  |  Placed: ${placed}/${binPackingClusters.length}`, x + 8, pad + 34);
+
+    for (let b = 0; b < binPackingBins; b++) {
+      const bx = x + 8 + b * binW;
+      const by = pad + 42;
+
+      ctx.fillStyle = '#12141a';
+      ctx.fillRect(bx, by, binW - 4, binH);
+      ctx.strokeStyle = '#2a2e3a';
+      ctx.strokeRect(bx, by, binW - 4, binH);
+
+      // Capacity line
+      ctx.strokeStyle = '#e0555544';
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(bx, by);
+      ctx.lineTo(bx + binW - 4, by);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Stack clusters
+      let stackY = by + binH;
+      const clustersInBin = data.assignment.filter(a => a.binId === b);
+      for (const cl of clustersInBin) {
+        const clH = Math.max(3, (cl.instructions / binPackingCapacity) * binH);
+        stackY -= clH;
+        ctx.fillStyle = cl.color;
+        ctx.globalAlpha = 0.75;
+        ctx.fillRect(bx + 1, stackY, binW - 6, clH - 1);
+        ctx.globalAlpha = 1;
+
+        if (clH > 12) {
+          ctx.fillStyle = '#fff';
+          ctx.font = '9px monospace';
+          ctx.fillText(`C${cl.id}`, bx + 3, stackY + 10);
+        }
+      }
+
+      // % label
+      const pct = data.binInsns[b] / binPackingCapacity;
+      ctx.fillStyle = utilizationColor(pct);
+      ctx.font = '9px monospace';
+      ctx.fillText(`${(pct * 100).toFixed(0)}%`, bx + 2, by + binH + 12);
+    }
+  });
+
+  // Unplaced items
+  const ffUnplaced = ff.assignment.filter(a => a.binId < 0);
+  const ffdUnplaced = ffd.assignment.filter(a => a.binId < 0);
+
+  if (ffUnplaced.length > 0 || ffdUnplaced.length > 0) {
+    ctx.fillStyle = '#e05555';
+    ctx.font = '11px monospace';
+    if (ffUnplaced.length > 0) ctx.fillText(`FF: ${ffUnplaced.length} unplaced`, pad + 8, h - 6);
+    if (ffdUnplaced.length > 0) ctx.fillText(`FFD: ${ffdUnplaced.length} unplaced`, pad * 2 + halfW + 8, h - 6);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STAGE COUNT COMPARISON RENDERER
+// ══════════════════════════════════════════════════════════════════════════════
+
+let stageComparisonResults = null;
+
+function runStageComparison(sim) {
+  const results = [];
+  const TOLERANCE = 0.999;
+
+  // Generate txs once so all stage counts compare the same transaction set
+  const baseTxs = generatePreset(sim.preset, sim.txCount, sim.binsPerStage, 1, sim.budget);
+
+  for (let sc = 1; sc <= 4; sc++) {
+    // Deep clone txs (fresh conflict sets and state for each run)
+    const txsCopy = baseTxs.map(t => new Transaction(t.id, t.fee, t.instructions, [...t.readKeys], [...t.writeKeys]));
+    detectConflicts(txsCopy);
+    const r = runAlgorithm(txsCopy, sc, sim.binsPerStage, Math.floor(sim.budget / sc));
+    const included = txsCopy.filter(t => t.included).length;
+    results.push({
+      stageCount: sc,
+      totalFee: r.totalFeeCollected,
+      included,
+      utilization: r.utilization,
+      surgePricing: r.surgePricing
+    });
+  }
+
+  const maxFee = Math.max(...results.map(r => r.totalFee));
+  const threshold = maxFee * TOLERANCE;
+
+  let winner = null;
+  for (const r of results) {
+    r.aboveThreshold = r.totalFee >= threshold;
+    if (r.aboveThreshold && (winner === null || r.stageCount < winner.stageCount)) {
+      winner = r;
+    }
+  }
+  if (winner) winner.isWinner = true;
+
+  stageComparisonResults = {results, maxFee, threshold};
+}
+
+function renderStageComparison(sim) {
+  const {w, h} = getCanvasSize();
+  ctx.clearRect(0, 0, w, h);
+
+  if (!stageComparisonResults) runStageComparison(sim);
+  const {results, maxFee, threshold} = stageComparisonResults;
+
+  const pad = 24;
+  const barAreaW = w - pad * 2;
+  const barAreaH = h - pad * 2 - 60;
+
+  ctx.fillStyle = '#181b24';
+  ctx.fillRect(pad, pad, barAreaW, barAreaH + 50);
+  ctx.strokeStyle = '#2a2e3a';
+  ctx.strokeRect(pad, pad, barAreaW, barAreaH + 50);
+
+  ctx.fillStyle = '#7a7e8c';
+  ctx.font = '13px monospace';
+  ctx.fillText('Stage Count Comparison — Total Fee Revenue', pad + 12, pad + 20);
+
+  const groupW = barAreaW / 4;
+
+  // Threshold line
+  if (maxFee > 0) {
+    const threshY = pad + 32 + barAreaH * (1 - threshold / maxFee);
+    ctx.strokeStyle = '#e0555566';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(pad, threshY);
+    ctx.lineTo(pad + barAreaW, threshY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#e05555';
+    ctx.font = '9px monospace';
+    ctx.fillText('99.9% threshold', pad + barAreaW - 110, threshY - 4);
+  }
+
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const cx = pad + groupW * i + groupW / 2;
+    const barW = Math.min(80, groupW * 0.6);
+
+    // Fee bar
+    const barH = maxFee > 0 ? (r.totalFee / maxFee) * (barAreaH - 10) : 0;
+    const by = pad + 32 + (barAreaH - 10) - barH;
+
+    ctx.fillStyle = r.isWinner ? '#5b8def' : (r.aboveThreshold ? '#5b8def88' : '#444');
+    ctx.fillRect(cx - barW / 2, by, barW, barH);
+
+    if (r.isWinner) {
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(cx - barW / 2, by, barW, barH);
+    }
+
+    // Labels
+    ctx.fillStyle = '#ccc';
+    ctx.font = '12px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${r.stageCount} stage${r.stageCount > 1 ? 's' : ''}`, cx, pad + barAreaH + 40);
+
+    ctx.font = '10px monospace';
+    ctx.fillStyle = '#aaa';
+    ctx.fillText(`Fee: ${r.totalFee.toLocaleString()}`, cx, by - 14);
+    ctx.fillText(`${r.included} txs`, cx, by - 3);
+
+    // Utilization bar below
+    const uBarW = barW;
+    const uBarH = 8;
+    const uY = pad + barAreaH + 44;
+    ctx.fillStyle = '#222';
+    ctx.fillRect(cx - uBarW / 2, uY, uBarW, uBarH);
+    ctx.fillStyle = utilizationColor(r.utilization);
+    ctx.fillRect(cx - uBarW / 2, uY, uBarW * r.utilization, uBarH);
+    ctx.fillStyle = '#888';
+    ctx.font = '9px monospace';
+    ctx.fillText(`${(r.utilization * 100).toFixed(1)}%`, cx, uY + 18);
+
+    if (r.isWinner) {
+      ctx.fillStyle = '#5b8def';
+      ctx.font = '10px monospace';
+      ctx.fillText('★ WINNER', cx, uY + 30);
+    }
+  }
+  ctx.textAlign = 'left';
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// UI WIRING
+// ══════════════════════════════════════════════════════════════════════════════
+
+let currentTab = 'packing';
+const sim = new PackingSimulation();
+let animFrame = null;
+
+function setupControls() {
+  const el = document.getElementById('controls');
+
+  if (currentTab === 'packing') {
+    el.innerHTML = `
+      <button id="btn-play">▶ Play</button>
+      <button id="btn-pause" style="display:none">⏸ Pause</button>
+      <button id="btn-step-back">◀ Step</button>
+      <button id="btn-step-fwd">Step ▶</button>
+      <button id="btn-reset">↻ Reset</button>
+      <div class="sep"></div>
+      <label>Speed</label>
+      <input type="range" id="sl-speed" min="1" max="30" value="${sim.speed}">
+      <span class="val" id="val-speed">${sim.speed}</span>
+      <div class="sep"></div>
+      <label>Bins/stage</label>
+      <input type="range" id="sl-bins" min="2" max="16" value="${sim.binsPerStage}">
+      <span class="val" id="val-bins">${sim.binsPerStage}</span>
+      <label>Stages</label>
+      <input type="range" id="sl-stages" min="1" max="4" value="${sim.stageCount}">
+      <span class="val" id="val-stages">${sim.stageCount}</span>
+      <label>Budget</label>
+      <input type="range" id="sl-budget" min="10000" max="500000" step="10000" value="${sim.budget}">
+      <span class="val" id="val-budget">${(sim.budget/1000)}k</span>
+      <label>Txs</label>
+      <input type="range" id="sl-txcount" min="5" max="50" value="${sim.txCount}">
+      <span class="val" id="val-txcount">${sim.txCount}</span>
+      <div class="sep"></div>
+      <label>Preset</label>
+      <select id="sel-preset">
+        <option value="oracle" ${sim.preset==='oracle'?'selected':''}>Oracle Update</option>
+        <option value="independent" ${sim.preset==='independent'?'selected':''}>All Independent</option>
+        <option value="chain" ${sim.preset==='chain'?'selected':''}>Transitive Chain</option>
+        <option value="near_capacity" ${sim.preset==='near_capacity'?'selected':''}>Near Capacity</option>
+        <option value="random" ${sim.preset==='random'?'selected':''}>Random</option>
+      </select>
+    `;
+
+    const btnPlay = document.getElementById('btn-play');
+    const btnPause = document.getElementById('btn-pause');
+
+    btnPlay.onclick = () => {
+      sim.playing = true;
+      sim.lastTick = performance.now();
+      btnPlay.style.display = 'none';
+      btnPause.style.display = '';
+    };
+    btnPause.onclick = () => {
+      sim.playing = false;
+      btnPlay.style.display = '';
+      btnPause.style.display = 'none';
+    };
+    document.getElementById('btn-step-fwd').onclick = () => { sim.playing = false; btnPlay.style.display=''; btnPause.style.display='none'; sim.stepForward(); };
+    document.getElementById('btn-step-back').onclick = () => { sim.playing = false; btnPlay.style.display=''; btnPause.style.display='none'; sim.stepBack(); };
+    document.getElementById('btn-reset').onclick = () => { sim.generate(); sim.playing = false; btnPlay.style.display=''; btnPause.style.display='none'; };
+
+    document.getElementById('sl-speed').oninput = e => { sim.speed = +e.target.value; document.getElementById('val-speed').textContent = sim.speed; };
+
+    const regen = () => { sim.generate(); stageComparisonResults = null; };
+    document.getElementById('sl-bins').oninput = e => { sim.binsPerStage = +e.target.value; document.getElementById('val-bins').textContent = sim.binsPerStage; regen(); };
+    document.getElementById('sl-stages').oninput = e => { sim.stageCount = +e.target.value; document.getElementById('val-stages').textContent = sim.stageCount; regen(); };
+    document.getElementById('sl-budget').oninput = e => { sim.budget = +e.target.value; document.getElementById('val-budget').textContent = (sim.budget/1000)+'k'; regen(); };
+    document.getElementById('sl-txcount').oninput = e => { sim.txCount = +e.target.value; document.getElementById('val-txcount').textContent = sim.txCount; regen(); };
+    document.getElementById('sel-preset').onchange = e => { sim.preset = e.target.value; regen(); };
+
+  } else if (currentTab === 'binpacking') {
+    el.innerHTML = `
+      <button id="btn-bp-regen">↻ Regenerate</button>
+      <div class="sep"></div>
+      <label>Clusters</label>
+      <input type="range" id="sl-bp-count" min="5" max="40" value="15">
+      <span class="val" id="val-bp-count">15</span>
+      <label>Bins</label>
+      <input type="range" id="sl-bp-bins" min="2" max="16" value="${sim.binsPerStage}">
+      <span class="val" id="val-bp-bins">${sim.binsPerStage}</span>
+      <label>Capacity</label>
+      <input type="range" id="sl-bp-cap" min="500" max="5000" step="100" value="1000">
+      <span class="val" id="val-bp-cap">1000</span>
+    `;
+    const regenBP = () => {
+      const count = +document.getElementById('sl-bp-count').value;
+      const bins = +document.getElementById('sl-bp-bins').value;
+      const cap = +document.getElementById('sl-bp-cap').value;
+      generateBinPackingData(count, bins, cap);
+    };
+    document.getElementById('btn-bp-regen').onclick = regenBP;
+    document.getElementById('sl-bp-count').oninput = e => { document.getElementById('val-bp-count').textContent = e.target.value; regenBP(); };
+    document.getElementById('sl-bp-bins').oninput = e => { document.getElementById('val-bp-bins').textContent = e.target.value; regenBP(); };
+    document.getElementById('sl-bp-cap').oninput = e => { document.getElementById('val-bp-cap').textContent = e.target.value; regenBP(); };
+
+  } else if (currentTab === 'stages') {
+    el.innerHTML = `
+      <button id="btn-sc-run">↻ Re-run Comparison</button>
+      <div class="sep"></div>
+      <label>Preset</label>
+      <select id="sel-sc-preset">
+        <option value="oracle" ${sim.preset==='oracle'?'selected':''}>Oracle Update</option>
+        <option value="independent" ${sim.preset==='independent'?'selected':''}>All Independent</option>
+        <option value="chain" ${sim.preset==='chain'?'selected':''}>Transitive Chain</option>
+        <option value="near_capacity" ${sim.preset==='near_capacity'?'selected':''}>Near Capacity</option>
+        <option value="random" ${sim.preset==='random'?'selected':''}>Random</option>
+      </select>
+      <label>Txs</label>
+      <input type="range" id="sl-sc-txcount" min="5" max="50" value="${sim.txCount}">
+      <span class="val" id="val-sc-txcount">${sim.txCount}</span>
+      <label>Bins/stage</label>
+      <input type="range" id="sl-sc-bins" min="2" max="16" value="${sim.binsPerStage}">
+      <span class="val" id="val-sc-bins">${sim.binsPerStage}</span>
+      <label>Budget</label>
+      <input type="range" id="sl-sc-budget" min="10000" max="500000" step="10000" value="${sim.budget}">
+      <span class="val" id="val-sc-budget">${(sim.budget/1000)}k</span>
+    `;
+    const rerunSC = () => {
+      stageComparisonResults = null;
+    };
+    document.getElementById('btn-sc-run').onclick = rerunSC;
+    document.getElementById('sel-sc-preset').onchange = e => { sim.preset = e.target.value; rerunSC(); };
+    document.getElementById('sl-sc-txcount').oninput = e => { sim.txCount = +e.target.value; document.getElementById('val-sc-txcount').textContent = sim.txCount; rerunSC(); };
+    document.getElementById('sl-sc-bins').oninput = e => { sim.binsPerStage = +e.target.value; document.getElementById('val-sc-bins').textContent = sim.binsPerStage; rerunSC(); };
+    document.getElementById('sl-sc-budget').oninput = e => { sim.budget = +e.target.value; document.getElementById('val-sc-budget').textContent = (sim.budget/1000)+'k'; rerunSC(); };
+  }
+}
+
+function updateNarration(sim) {
+  const el = document.getElementById('narration');
+  if (currentTab !== 'packing') {
+    if (currentTab === 'binpacking') {
+      el.innerHTML = `<span class="step-text">Side-by-side comparison of First-Fit (items in arrival order) vs First-Fit Decreasing (sorted largest-first). FFD has an 11/9 ≈ 1.22x approximation ratio vs ~1.7x for unordered first-fit. Regenerate to see different cluster sets.</span>`;
+    } else {
+      const r = stageComparisonResults;
+      if (r) {
+        const winner = r.results.find(x => x.isWinner);
+        el.innerHTML = `<span class="step-text">Algorithm runs with 1–4 stages. Winner: fewest stages with ≥99.9% of max fee. ${winner ? `<b>Winner: ${winner.stageCount} stage${winner.stageCount>1?'s':''}</b> (fee: ${winner.totalFee.toLocaleString()}, ${winner.included} txs, ${(winner.utilization*100).toFixed(1)}% util)` : 'No winner.'}</span>`;
+      } else {
+        el.innerHTML = '<span class="step-text">Click "Re-run Comparison" to run all stage counts.</span>';
+      }
+    }
+    return;
+  }
+
+  const state = sim.currentState();
+  const stepInfo = `Step ${sim.step + 1}/${sim.trace.length}`;
+
+  el.innerHTML = `
+    <div>
+      <span class="step-label">${stepInfo}</span>
+      <span class="step-text">${state.narration}</span>
+    </div>
+    <div class="stats-row">
+      <span class="stat"><span class="stat-label">Fee collected: </span><span class="stat-value">${state.totalFee.toLocaleString()}</span></span>
+      <span class="stat"><span class="stat-label">Included: </span><span class="stat-value">${state.includedTxs.size}/${sim.txs.length}</span></span>
+      <span class="stat"><span class="stat-label">Skipped: </span><span class="stat-value">${state.skippedTxs.size}</span></span>
+      ${state.surgePricing ? '<span class="stat" style="color:#e05555">⚡ Surge pricing</span>' : ''}
+    </div>
+  `;
+}
+
+// Tabs
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    currentTab = tab.dataset.tab;
+    setupControls();
+  };
+});
+
+// Main loop
+function tick(now) {
+  resizeCanvas();
+
+  if (currentTab === 'packing') {
+    // Track step changes for animation
+    if (sim.step !== sim.prevStep) {
+      sim.lastStepChange = now;
+      sim.prevStep = sim.step;
+    }
+
+    if (sim.playing) {
+      const dt = now - sim.lastTick;
+      const interval = 1000 / sim.speed;
+      if (dt >= interval) {
+        sim.lastTick = now;
+        if (sim.step < sim.trace.length - 1) {
+          sim.stepForward();
+        } else {
+          sim.playing = false;
+          const btnPlay = document.getElementById('btn-play');
+          const btnPause = document.getElementById('btn-pause');
+          if (btnPlay) btnPlay.style.display = '';
+          if (btnPause) btnPause.style.display = 'none';
+        }
+      }
+    }
+    renderPackingSimulation(sim);
+  } else if (currentTab === 'binpacking') {
+    renderBinPackingComparison();
+  } else if (currentTab === 'stages') {
+    renderStageComparison(sim);
+  }
+
+  updateNarration(sim);
+  animFrame = requestAnimationFrame(tick);
+}
+
+// Init
+sim.generate();
+setupControls();
+animFrame = requestAnimationFrame(tick);
+
+// Handle resize
+window.addEventListener('resize', () => {
+  resizeCanvas();
+});
+
+// Keyboard shortcuts
+document.addEventListener('keydown', e => {
+  if (currentTab !== 'packing') return;
+  if (e.key === ' ' || e.key === 'k') {
+    e.preventDefault();
+    if (sim.playing) {
+      sim.playing = false;
+    } else {
+      sim.playing = true;
+      sim.lastTick = performance.now();
+    }
+    setupControls(); // refresh button state
+  } else if (e.key === 'ArrowRight' || e.key === 'l') {
+    sim.playing = false;
+    sim.stepForward();
+  } else if (e.key === 'ArrowLeft' || e.key === 'h') {
+    sim.playing = false;
+    sim.stepBack();
+  }
+});
+</script>
+</body>
+</html>
