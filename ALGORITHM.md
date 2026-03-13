@@ -7,13 +7,14 @@ Complete pseudocode derived from the stellar-core implementation (`ParallelTxSet
 ## Table of Contents
 
 0. [Semantics and Glossary](#0-semantics-and-glossary)
-1. [Data Structures](#1-data-structures)
-2. [Phase 1: Conflict Detection](#2-phase-1-conflict-detection)
-3. [Phase 2: Fee-Ordered Greedy Packing](#3-phase-2-fee-ordered-greedy-packing)
-4. [Phase 3: Adding a Transaction to a Stage](#4-phase-3-adding-a-transaction-to-a-stage)
-5. [Phase 4: Bin Packing](#5-phase-4-bin-packing)
-6. [Phase 5: Multi-Stage-Count Selection](#6-phase-5-multi-stage-count-selection)
-7. [Phase 6: Output Assembly](#7-phase-6-output-assembly)
+1. [Requirements](#1-requirements)
+2. [Data Structures](#2-data-structures)
+3. [Phase 1: Conflict Detection](#3-phase-1-conflict-detection)
+4. [Phase 2: Fee-Ordered Greedy Packing](#4-phase-2-fee-ordered-greedy-packing)
+5. [Phase 3: Adding a Transaction to a Stage](#5-phase-3-adding-a-transaction-to-a-stage)
+6. [Phase 4: Bin Packing](#6-phase-4-bin-packing)
+7. [Phase 5: Multi-Stage-Count Selection](#7-phase-5-multi-stage-count-selection)
+8. [Phase 6: Output Assembly](#8-phase-6-output-assembly)
 
 
 ---
@@ -73,21 +74,49 @@ This must not exceed `ledgerMaxInstructions`.
 | **`ledgerMaxInstructions`** | Network configuration setting. Total instruction budget for the Soroban phase, measured as `sum(max(bin_instructions) per stage)`. |
 | **`SOROBAN_PHASE_MIN/MAX_STAGE_COUNT`** | Node-local configuration. Range of stage counts to try during construction (default 1–4). Not a protocol parameter — different stage counts produce different valid transaction sets. |
 
-### Terminology Cross-Reference
+---
 
-The same concepts have different names across documents:
+## 1. Requirements
 
-| Concept | stellar-core | CAP-0063 (XDR) | Design PDF | Spec |
-|---------|-------------|----------------|------------|------|
-| Sequential step | Stage | Stage (`ParallelTxExecutionStage`) | Stage | Stage |
-| Parallel execution unit | Bin | `DependentTxCluster` | Logical thread | Cluster |
-| Dependency group (internal) | Cluster | *(not exposed)* | Conflict cluster | *(not exposed)* |
-| Max bins per stage | `mClustersPerStage` | `ledgerMaxDependentTxClusters` | `max_threads` | `ledgerMaxDependentTxClusters` |
-| Per-bin instruction limit | `mInstructionsPerCluster` | *(implicit from validation)* | `floor(max_sequential_instructions / stage_count)` | *(implicit from validation)* |
+The algorithm must produce a valid parallel transaction set satisfying all of the following:
+
+### R1. Conflict Safety
+
+No two transactions in **different bins within the same stage** may access the same ledger key where at least one access is a write. Formally: if tx A is in bin X and tx B is in bin Y (X ≠ Y) of the same stage, then `footprint(A).readWrite ∩ footprint(B).readWrite = ∅` and `footprint(A).readWrite ∩ footprint(B).readOnly = ∅` (and vice versa). Transactions within the *same* bin may conflict freely — they execute sequentially.
+
+### R2. Bounded Execution Time
+
+The total wall-clock cost of the phase must not exceed the network's instruction budget:
+
+```
+sum over all stages of: max(bin_instructions in that stage) ≤ ledgerMaxInstructions
+```
+
+This is the "makespan" — the longest bin in each stage determines that stage's cost, and stages run sequentially. The per-bin limit is derived as `ledgerMaxInstructions / stage_count`.
+
+### R3. Fee Revenue Maximization
+
+Transactions are processed in **descending inclusion fee order**. The algorithm greedily includes the highest-paying transactions first. When multiple stage counts are tried, the result with the **fewest stages** that captures at least **99.9%** of the maximum total fee across all candidates is selected — preferring simplicity over marginal revenue.
+
+### R4. Parallelism Budget
+
+Each stage has at most `ledgerMaxDependentTxClusters` bins (one per CPU core). This is a network-wide parameter that defines the minimum hardware parallelism validators must support.
+
+### R5. Resource Limits
+
+Beyond instructions, each transaction consumes non-instruction resources (read bytes, write bytes, transaction size). These are checked against a **single shared lane limit** summed across the entire phase. A transaction that exceeds remaining lane capacity is skipped regardless of whether it would fit in a stage's instruction budget.
+
+### R6. Surge Pricing
+
+If any transaction is skipped during packing (either because it exceeds lane limits or because no stage can fit it), **surge pricing** is triggered. The lowest inclusion fee among all included transactions becomes the base fee for the entire transaction set.
+
+### R7. Deterministic Validation
+
+Different validators may construct different transaction sets (e.g., by trying different stage counts or having different mempools). However, any valid parallel transaction set must pass the **same validation rules**: conflict safety (R1), instruction bounds (R2), parallelism limits (R4), and resource limits (R5). Construction is a local heuristic; validation is a protocol invariant.
 
 ---
 
-## 1. Data Structures
+## 2. Data Structures
 
 ```
 struct ParallelPartitionConfig:
@@ -120,7 +149,7 @@ struct Stage:
 
 ---
 
-## 2. Phase 1: Conflict Detection
+## 3. Phase 1: Conflict Detection
 
 Before any packing happens, we need to know which transactions conflict with each other. This phase scans every transaction's declared footprint (read-only and read-write keys), groups entries by key hash, and marks pairs of transactions as conflicting if they share a key where at least one side is writing. The output is a lightweight `BuilderTx` per transaction, each carrying a BitSet of its conflict partners. This conflict information drives all downstream placement decisions.
 
@@ -187,7 +216,7 @@ function detect_conflicts(tx_frames) -> list<BuilderTx>:
 
 ---
 
-## 3. Phase 2: Fee-Ordered Greedy Packing
+## 4. Phase 2: Fee-Ordered Greedy Packing
 
 This is the main loop. Transactions are sorted by descending inclusion fee (highest bidder first) and processed one at a time. For each transaction, we first check whether it fits within the remaining non-instruction resource budget (read bytes, write bytes, tx size). If it does, we try to place it into the first stage that can accommodate it. If no stage can fit it, the transaction is skipped and the `had_tx_not_fitting_lane` flag is set, which triggers surge pricing for the resulting transaction set.
 
@@ -247,7 +276,7 @@ function pack_with_stage_count(sorted_tx_order, tx_resources, lane_limit,
 
 ---
 
-## 4. Phase 3: Adding a Transaction to a Stage
+## 5. Phase 3: Adding a Transaction to a Stage
 
 This is where the core constraint logic lives. When a transaction is offered to a stage, we first fast-fail if the stage's total instructions are already at capacity. Then we find every existing cluster that conflicts with the new transaction, merge them all (plus the new tx) into a single cluster, and check whether the merged cluster's instructions exceed the per-bin limit. If it fits, we try to pack it into a bin — first with a cheap in-place first-fit, and if that fails, with a full first-fit-decreasing rebuild. If neither works, we roll back and the transaction is rejected from this stage.
 
@@ -306,7 +335,7 @@ function Stage.try_add(tx: BuilderTx) -> bool:
     return true
 ```
 
-### 4.1 Finding Conflicting Clusters
+### 5.1 Finding Conflicting Clusters
 
 ```
 function Stage.get_conflicting_clusters(tx: BuilderTx) -> set<Cluster*>:
@@ -323,7 +352,7 @@ function Stage.get_conflicting_clusters(tx: BuilderTx) -> set<Cluster*>:
     return result
 ```
 
-### 4.2 Cluster Merging
+### 5.2 Cluster Merging
 
 ```
 function Cluster.merge(other: Cluster):
@@ -336,11 +365,11 @@ This creates a **transitive closure**: if tx A conflicts with tx B and tx B conf
 
 ---
 
-## 5. Phase 4: Bin Packing
+## 6. Phase 4: Bin Packing
 
 A stage may accumulate many fine-grained clusters (each a transitive dependency group), but the network only allows a fixed number of parallel execution units (bins) per stage. This phase solves the classic bin packing problem: fit all clusters into N equal-capacity bins, where N = `ledgerMaxDependentTxClusters` and each bin's capacity = `ledgerMaxInstructions / stage_count`. Two heuristics are used — a fast in-place first-fit for the common case, and a full first-fit-decreasing (FFD) rebuild as a fallback when the fast path can't find room.
 
-### 5.1 In-Place First-Fit (Fast Path)
+### 6.1 In-Place First-Fit (Fast Path)
 
 **Source:** `inPlaceBinPacking()` (lines 277-303)
 
@@ -365,7 +394,7 @@ function Stage.in_place_bin_packing(new_cluster, removed_clusters) -> bool:
 
 **Approximation ratio:** ~1.7x (unordered first-fit).
 
-### 5.2 Full Rebuild: First-Fit-Decreasing (Fallback)
+### 6.2 Full Rebuild: First-Fit-Decreasing (Fallback)
 
 **Source:** `binPacking()` (lines 358-399)
 
@@ -392,7 +421,7 @@ function Stage.ffd_bin_packing(clusters, out bin_instructions) -> bool:
 
 **Approximation ratio:** 11/9 (~1.22x) — the classic FFD bin packing guarantee.
 
-### 5.3 The Compacting Optimization
+### 6.3 The Compacting Optimization
 
 After the first time an independent (no-conflict) transaction fails in-place packing and also fails the full FFD rebuild, the stage sets `tried_compacting = true`. All subsequent independent transactions that fail in-place packing are immediately rejected without attempting a full rebuild.
 
@@ -402,7 +431,7 @@ This optimization is **not** applied to transactions that have conflicts, becaus
 
 ---
 
-## 6. Phase 5: Multi-Stage-Count Selection
+## 7. Phase 5: Multi-Stage-Count Selection
 
 The algorithm doesn't know upfront how many stages will yield the best result. More stages help work around I/O conflicts (e.g., separating a writer from its readers) but each stage has a smaller per-bin instruction budget (`ledgerMaxInstructions / stage_count`), which can waste capacity if transactions are large. So the algorithm runs Phase 2–4 in parallel threads for each candidate stage count (default 1 through 4) and picks the winner: the result with the **fewest stages** that still captures at least 99.9% of the maximum total inclusion fee across all candidates.
 
@@ -451,7 +480,7 @@ function build_parallel_soroban_phase(tx_frames, cfg, soroban_cfg,
 
 ---
 
-## 7. Phase 6: Output Assembly
+## 8. Phase 6: Output Assembly
 
 The internal representation (stages containing clusters assigned to bins) is now flattened into the output format. Each bin becomes a list of transaction frames — the fine-grained cluster boundaries are erased. Trailing empty stages are trimmed. The output then goes through XDR serialization, which applies canonical ordering (sort by SHA-256 hash at each level) and attaches the base fee.
 
