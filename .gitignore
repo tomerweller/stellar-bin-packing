@@ -1,1 +1,6 @@
 .DS_Store
+stellar-core-code/
+specs/
+cap-0063.md
+Building tx sets for parallel processing.pdf
+MANIFEST.md

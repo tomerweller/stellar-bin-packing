@@ -6,7 +6,7 @@ Educational deep-dive into Stellar's parallel transaction scheduling algorithm �
 
 ### [ALGORITHM.md](ALGORITHM.md) — Pseudocode & Explanation
 
-Complete pseudocode for the bin packing algorithm, derived from the `stellar-core` implementation (`ParallelTxSetBuilder.cpp`). Covers all six phases:
+Complete pseudocode for the bin packing algorithm, derived from the `stellar-core` implementation ([`ParallelTxSetBuilder.cpp`](https://github.com/nickinack/stellar-core/blob/master/src/herder/ParallelTxSetBuilder.cpp)). Covers all six phases:
 
 1. **Conflict Detection** — scan footprints, mark RW-RW and RO-RW conflicts via key hashing
 2. **Fee-Ordered Greedy Packing** — iterate transactions by descending inclusion fee, try stages in order
@@ -19,7 +19,7 @@ Includes a glossary, terminology cross-reference across stellar-core / CAP-0063 
 
 ### [visualization.html](visualization.html) — Interactive Visualization
 
-A single-file, zero-dependency interactive visualization. Open it in any browser.
+A single-file, zero-dependency interactive visualization. Open it in any browser — or [view it online](https://raw.githack.com/tomerweller/stellar-bin-packing/main/visualization.html).
 
 **Three tabs:**
 
@@ -36,16 +36,11 @@ A single-file, zero-dependency interactive visualization. Open it in any browser
 
 **Controls:** Play/Pause, Step Forward/Back, Speed slider, configurable bins/stages/budget/tx count. Keyboard: Space to play/pause, Arrow keys to step.
 
-## Source Materials
+## References
 
-Reference materials used to produce the algorithm writeup (see [MANIFEST.md](MANIFEST.md) for details):
-
-| Directory | Contents |
-|-----------|----------|
-| `stellar-core-code/` | `ParallelTxSetBuilder.cpp/.h`, `TxSetFrame.cpp/.h` — the implementation |
-| `specs/` | Excerpts from `stellar-spec`: herder, transaction, and ledger specs |
-| `cap-0063.md` | CAP-0063: Parallelism-friendly Transaction Scheduling |
-| `Building tx sets for parallel processing.pdf` | Original design document by Dmytro Kozhevin |
+- [CAP-0063: Parallelism-friendly Transaction Scheduling](https://github.com/stellar/stellar-protocol/blob/master/core/cap-0063.md)
+- [stellar-core `ParallelTxSetBuilder.cpp`](https://github.com/nickinack/stellar-core/blob/master/src/herder/ParallelTxSetBuilder.cpp)
+- [stellar-spec](https://github.com/tomerweller/stellar-spec) — herder, transaction, and ledger specs
 
 ## Quick Start
 
@@ -53,13 +48,6 @@ Reference materials used to produce the algorithm writeup (see [MANIFEST.md](MAN
 open visualization.html
 ```
 
-Or serve locally:
-
-```bash
-python3 -m http.server 8000
-# then open http://localhost:8000/visualization.html
-```
-
 ## License
 
-The source materials (`stellar-core-code/`, `specs/`, `cap-0063.md`, PDF) are from the [Stellar](https://github.com/stellar) project and subject to their respective licenses. The algorithm writeup and visualization are provided for educational purposes.
+The algorithm writeup and visualization are provided for educational purposes. Based on the [Stellar](https://github.com/stellar) project source code and specifications.
